@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>MenthorQ Export</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 12px; width: 350px; }
+      button { width: 100%; margin-top: 8px; padding: 8px; }
+      #status { margin-top: 10px; font-size: 12px; white-space: pre-wrap; max-height: 180px; overflow: auto; }
+      label, input, select { width: 100%; box-sizing: border-box; }
+      input, select { margin-top: 6px; padding: 6px; }
+      .section { border-top: 1px solid #ddd; margin-top: 12px; padding-top: 12px; }
+      .muted { color: #666; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h3>MenthorQ Levels Export</h3>
+    <label for="symbolInput">Symbol (単発保存時 / 例: SPX)</label>
+    <input id="symbolInput" placeholder="SPX" />
+
+    <button id="exportJson">現在表示をJSONで保存</button>
+    <button id="exportCsv">現在表示をCSVで保存</button>
+
+    <div class="section">
+      <label for="daysBack">自動収集日数（過去N日）</label>
+      <select id="daysBack">
+        <option value="7" selected>7日</option>
+        <option value="5">5日</option>
+        <option value="10">10日</option>
+      </select>
+      <button id="runWatchlistAuto">Watchlistを自動収集（Gamma Levels EOD）</button>
+      <div class="muted">不足日がある銘柄だけ Prev Date で遡って補完し、最後に1つのJSONにまとめて保存します。</div>
+    </div>
+
+    <div id="status">app.menthorq.io/en/levels の結果画面で使ってください。</div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
