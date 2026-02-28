@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "MenthorQ Levels Exporter",
+  "version": "1.0.0",
+  "description": "Export levels text from app.menthorq.io/en/levels into local JSON/CSV files.",
+  "permissions": ["activeTab", "scripting", "downloads", "storage"],
+  "host_permissions": ["https://app.menthorq.io/*"],
+  "action": {
+    "default_title": "MenthorQ Export",
+    "default_popup": "popup.html"
+  }
+}
