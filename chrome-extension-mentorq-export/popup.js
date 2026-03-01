@@ -340,6 +340,7 @@ async function runTickerAutomation(tabId, tickers, daysBack) {
         if (!(await selectTicker(ticker))) {
           perTicker.warnings.push("ticker selection failed");
           output.tickers.push(perTicker);
+          clickByText("body", "Search Tickers");
           continue;
         }
 
