@@ -7,8 +7,8 @@
       body { font-family: system-ui, sans-serif; margin: 12px; width: 350px; }
       button { width: 100%; margin-top: 8px; padding: 8px; }
       #status { margin-top: 10px; font-size: 12px; white-space: pre-wrap; max-height: 180px; overflow: auto; }
-      label, input, textarea { width: 100%; box-sizing: border-box; }
-      input, textarea { margin-top: 6px; padding: 6px; }
+      label, input, textarea, select { width: 100%; box-sizing: border-box; }
+      input, textarea, select { margin-top: 6px; padding: 6px; }
       textarea { min-height: 70px; resize: vertical; }
       .section { border-top: 1px solid #ddd; margin-top: 12px; padding-top: 12px; }
       .muted { color: #666; font-size: 12px; }
@@ -32,8 +32,14 @@
       <label for="saveDirInput">保存先ディレクトリ（Downloads配下）</label>
       <input id="saveDirInput" placeholder="mentorq-levels" value="mentorq-levels" />
 
+      <label for="outputFormat">出力形式</label>
+      <select id="outputFormat">
+        <option value="jsonl" selected>JSONL（1行1レコード）</option>
+        <option value="csv">CSV</option>
+      </select>
+
       <button id="runTickerAuto">指定銘柄を自動収集（Gamma Levels EOD）</button>
-      <div class="muted">指定銘柄のみを収集します。不足日がある場合は Prev Date で遡って補完し、1つのJSONにまとめて保存します。</div>
+      <div class="muted">日付＋銘柄単位で1行のJSONL/CSVを出力します。固定sleepを最小化し、Prev/Next Date後に日付遷移を検証します。</div>
     </div>
 
     <div id="status">app.menthorq.io/en/levels の結果画面で使ってください。</div>

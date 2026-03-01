@@ -3,6 +3,7 @@ const symbolInput = document.getElementById("symbolInput");
 const tickerListInput = document.getElementById("tickerListInput");
 const daysBackInput = document.getElementById("daysBackInput");
 const saveDirInput = document.getElementById("saveDirInput");
+const outputFormatSelect = document.getElementById("outputFormat");
 
 const SETTINGS_KEY = "mentorqExporterSettings";
 
@@ -35,19 +36,76 @@ function normalizeSaveDir(dir) {
   return sanitized || "mentorq-levels";
 }
 
+function parseDate(value) {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function flattenRows(result) {
+  const rows = [];
+  for (const tickerData of result.tickers) {
+    const warning = tickerData.warnings.join("; ");
+    for (const record of tickerData.records) {
+      const parsed = parseLevels(record.rawText);
+      rows.push({
+        date: record.date,
+        requestedTicker: tickerData.ticker,
+        symbol: parsed.symbol,
+        capturedAt: parsed.capturedAt,
+        rawText: parsed.rawText,
+        items: parsed.items,
+        warning
+      });
+    }
+  }
+  return rows;
+}
+
+function toAutomationCsv(rows) {
+  const escape = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+  const header = ["date", "requested_ticker", "symbol", "captured_at", "raw_text", "items_json", "warning"];
+  const lines = rows.map((row) => [
+    row.date,
+    row.requestedTicker,
+    row.symbol,
+    row.capturedAt,
+    row.rawText,
+    JSON.stringify(row.items),
+    row.warning
+  ]);
+  return [header, ...lines].map((line) => line.map(escape).join(",")).join("\n");
+}
+
+function toAutomationJsonl(rows) {
+  return rows
+    .map((row) => JSON.stringify({
+      date: row.date,
+      requestedTicker: row.requestedTicker,
+      symbol: row.symbol,
+      capturedAt: row.capturedAt,
+      rawText: row.rawText,
+      items: row.items,
+      warning: row.warning
+    }))
+    .join("\n");
+}
+
 async function loadSettings() {
   const stored = await chrome.storage.local.get(SETTINGS_KEY);
   const settings = stored[SETTINGS_KEY] || {};
   if (settings.tickerList) tickerListInput.value = settings.tickerList;
   if (settings.daysBack) daysBackInput.value = String(settings.daysBack);
   if (settings.saveDir) saveDirInput.value = settings.saveDir;
+  if (settings.outputFormat) outputFormatSelect.value = settings.outputFormat;
 }
 
 async function saveSettings() {
   const payload = {
     tickerList: tickerListInput.value,
     daysBack: Number(daysBackInput.value || "7"),
-    saveDir: normalizeSaveDir(saveDirInput.value)
+    saveDir: normalizeSaveDir(saveDirInput.value),
+    outputFormat: outputFormatSelect.value
   };
   await chrome.storage.local.set({ [SETTINGS_KEY]: payload });
 }
@@ -120,7 +178,7 @@ function downloadContent(filename, content, mime) {
   return chrome.downloads.download({
     url,
     filename,
-    saveAs: true
+    saveAs: false
   });
 }
 
@@ -145,13 +203,13 @@ async function exportFile(format) {
 
     if (format === "json") {
       await downloadContent(`${base}.json`, JSON.stringify(record, null, 2), "application/json");
-      setStatus("JSON保存ダイアログを開きました。保存先を選んでください。");
+      setStatus("JSONを自動ダウンロードしました。");
       return;
     }
 
     const csv = toCsv(record);
     await downloadContent(`${base}.csv`, csv, "text/csv");
-    setStatus("CSV保存ダイアログを開きました。保存先を選んでください。");
+    setStatus("CSVを自動ダウンロードしました。");
   } catch (error) {
     setStatus(`エラー: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -198,15 +256,12 @@ async function runTickerAutomation(tabId, tickers, daysBack) {
       const clearSelectedTickers = () => {
         const clearButtons = Array.from(document.querySelectorAll("button"))
           .filter((btn) => /remove|clear|×|x/i.test((btn.getAttribute("aria-label") || "") + (btn.textContent || "")));
-        let clicked = 0;
         clearButtons.forEach((btn) => {
           const rect = btn.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
             btn.click();
-            clicked += 1;
           }
         });
-        return clicked;
       };
 
       const chooseSearchTickersTab = () => clickByText("button", "Search Tickers");
@@ -217,7 +272,7 @@ async function runTickerAutomation(tabId, tickers, daysBack) {
           input.focus();
           input.value = ticker;
           input.dispatchEvent(new Event("input", { bubbles: true }));
-          await sleep(200);
+          await sleep(120);
         }
 
         const option = Array.from(document.querySelectorAll('[role="option"], [cmdk-item], button, div')).find((el) => {
@@ -239,24 +294,28 @@ async function runTickerAutomation(tabId, tickers, daysBack) {
           return false;
         });
         if (!okOpen) return false;
-        await sleep(200);
-        const clicked = clickByText("[role='option'], button, div", "Gamma Levels EOD");
-        await sleep(200);
-        return clicked;
+        await sleep(120);
+        return clickByText("[role='option'], button, div", "Gamma Levels EOD");
       };
 
       const clickSearch = () => clickByText("button", "Search");
       const clickPrevDate = () => clickByText("button", "Prev Date");
+      const clickNextDate = () => clickByText("button", "Next Date");
 
-      const waitForTextChange = async (prev, timeout = 12000) => {
+      const waitForResultUpdate = async ({ prevRaw, prevDate, timeout = 12000 }) => {
         const start = Date.now();
         while (Date.now() - start < timeout) {
-          const current = getCurrentRawText();
-          if (current && current !== prev) return true;
-          await sleep(300);
+          const currentRaw = getCurrentRawText();
+          const currentDate = getDisplayedDate();
+          if (currentRaw && (currentRaw !== prevRaw || (currentDate && currentDate !== prevDate))) {
+            return { changed: true, currentRaw, currentDate };
+          }
+          await sleep(180);
         }
-        return false;
+        return { changed: false, currentRaw: getCurrentRawText(), currentDate: getDisplayedDate() };
       };
+
+      const normalizeSymbolInPage = (symbol) => String(symbol || "").replace(/^\$/, "").trim().toUpperCase();
 
       const output = {
         ok: true,
@@ -275,9 +334,7 @@ async function runTickerAutomation(tabId, tickers, daysBack) {
           continue;
         }
 
-        await sleep(250);
         chooseSearchTickersTab();
-        await sleep(200);
         clearSelectedTickers();
 
         if (!(await selectTicker(ticker))) {
@@ -287,48 +344,93 @@ async function runTickerAutomation(tabId, tickers, daysBack) {
           continue;
         }
 
-        await sleep(200);
-
         const gammaOk = await ensureGammaEod();
         if (!gammaOk) {
           perTicker.warnings.push("gamma eod selection failed");
         }
 
-        const beforeSearch = getCurrentRawText();
+        const beforeSearchRaw = getCurrentRawText();
+        const beforeSearchDate = getDisplayedDate();
         if (!clickSearch()) {
           perTicker.warnings.push("search click failed");
           output.tickers.push(perTicker);
           continue;
         }
 
-        await waitForTextChange(beforeSearch, 15000);
-        let raw = getCurrentRawText();
-        let date = getDisplayedDate();
-        if (raw) {
-          perTicker.records.push({ date: date || "unknown", rawText: raw });
-        } else {
-          perTicker.warnings.push("search result empty");
+        const firstUpdate = await waitForResultUpdate({ prevRaw: beforeSearchRaw, prevDate: beforeSearchDate, timeout: 15000 });
+        if (!firstUpdate.changed || !firstUpdate.currentRaw) {
+          perTicker.warnings.push("search result timeout or empty");
+          output.tickers.push(perTicker);
+          continue;
+        }
+
+        let lastRaw = firstUpdate.currentRaw;
+        let lastDate = firstUpdate.currentDate;
+
+        const firstSymbol = normalizeSymbolInPage(firstUpdate.currentRaw.split(":")[0]);
+        if (firstSymbol !== normalizeSymbolInPage(ticker)) {
+          perTicker.warnings.push(`symbol mismatch after search: expected ${ticker}, got ${firstSymbol || "UNKNOWN"}`);
+          output.tickers.push(perTicker);
+          continue;
+        }
+
+        if (lastDate) {
+          // 可能なら最新日まで進めてから収集開始
+          for (let i = 0; i < 30; i += 1) {
+            const prevDate = getDisplayedDate();
+            const prevRaw = getCurrentRawText();
+            if (!clickNextDate()) break;
+            const next = await waitForResultUpdate({ prevRaw, prevDate, timeout: 5000 });
+            if (!next.changed) break;
+            const nextDateTs = Date.parse(next.currentDate || "");
+            const prevDateTs = Date.parse(prevDate || "");
+            if (!Number.isNaN(nextDateTs) && !Number.isNaN(prevDateTs) && nextDateTs < prevDateTs) {
+              perTicker.warnings.push("next date moved backward unexpectedly");
+              break;
+            }
+            lastRaw = next.currentRaw || lastRaw;
+            lastDate = next.currentDate || lastDate;
+          }
+        }
+
+        if (lastRaw) {
+          perTicker.records.push({ date: lastDate || "unknown", rawText: lastRaw });
         }
 
         const seenDates = new Set(perTicker.records.map((r) => r.date));
+        let prevDateTs = parseDate(lastDate);
 
         while (seenDates.size < requestedDaysBack) {
-          const prevBefore = getCurrentRawText();
+          const beforePrevRaw = getCurrentRawText();
+          const beforePrevDate = getDisplayedDate();
           if (!clickPrevDate()) {
             perTicker.warnings.push("prev date unavailable before enough days");
             break;
           }
-          const changed = await waitForTextChange(prevBefore, 15000);
-          if (!changed) {
+
+          const moved = await waitForResultUpdate({ prevRaw: beforePrevRaw, prevDate: beforePrevDate, timeout: 15000 });
+          if (!moved.changed || !moved.currentRaw) {
             perTicker.warnings.push("prev date timeout");
             break;
           }
-          raw = getCurrentRawText();
-          date = getDisplayedDate();
-          const key = date || `unknown-${perTicker.records.length + 1}`;
-          if (raw && !seenDates.has(key)) {
-            perTicker.records.push({ date: key, rawText: raw });
+
+          const movedDateTs = parseDate(moved.currentDate);
+          if (prevDateTs && movedDateTs && movedDateTs >= prevDateTs) {
+            perTicker.warnings.push("prev date did not move to older date");
+            break;
+          }
+
+          const currentSymbol = normalizeSymbolInPage(moved.currentRaw.split(":")[0]);
+          if (currentSymbol !== normalizeSymbolInPage(ticker)) {
+            perTicker.warnings.push(`symbol mismatch on prev date: expected ${ticker}, got ${currentSymbol || "UNKNOWN"}`);
+            break;
+          }
+
+          const key = moved.currentDate || `unknown-${perTicker.records.length + 1}`;
+          if (!seenDates.has(key)) {
+            perTicker.records.push({ date: key, rawText: moved.currentRaw });
             seenDates.add(key);
+            prevDateTs = movedDateTs || prevDateTs;
           }
         }
 
@@ -358,12 +460,14 @@ async function autoCollectTickers() {
 
     const daysBack = Math.max(1, Number(daysBackInput.value || "7"));
     const saveDir = normalizeSaveDir(saveDirInput.value);
+    const outputFormat = outputFormatSelect.value === "csv" ? "csv" : "jsonl";
     saveDirInput.value = saveDir;
     await saveSettings();
 
     appendStatus(`対象銘柄: ${tickers.join(", ")}`);
     appendStatus(`対象期間: 過去${daysBack}日`);
     appendStatus(`保存先: ${saveDir}/`);
+    appendStatus(`出力形式: ${outputFormat.toUpperCase()}`);
 
     const result = await runTickerAutomation(tab.id, tickers, daysBack);
     if (!result.ok) {
@@ -371,26 +475,23 @@ async function autoCollectTickers() {
       return;
     }
 
-    const normalized = {
-      generatedAt: result.generatedAt,
-      daysBack: result.daysBack,
-      tickers: result.tickers.map((t) => ({
-        ticker: t.ticker,
-        warnings: t.warnings,
-        records: t.records.map((r) => ({
-          date: r.date,
-          ...parseLevels(r.rawText)
-        }))
-      }))
-    };
-
+    const rows = flattenRows(result);
     const timestamp = new Date().toISOString().replaceAll(":", "-");
-    const filename = `${saveDir}/tickers_gamma_eod_${timestamp}.json`;
-    await downloadContent(filename, JSON.stringify(normalized, null, 2), "application/json");
+    if (outputFormat === "csv") {
+      const csv = toAutomationCsv(rows);
+      await downloadContent(`${saveDir}/tickers_by_date_${timestamp}.csv`, csv, "text/csv");
+    } else {
+      const jsonl = toAutomationJsonl(rows);
+      await downloadContent(`${saveDir}/tickers_by_date_${timestamp}.jsonl`, jsonl, "application/x-ndjson");
+    }
 
-    const okCount = normalized.tickers.filter((t) => t.records.length > 0).length;
-    appendStatus(`完了: ${okCount}/${normalized.tickers.length} 銘柄を保存`);
-    appendStatus("JSON保存ダイアログを開きました。");
+    const okCount = result.tickers.filter((t) => t.records.length > 0).length;
+    appendStatus(`完了: ${okCount}/${result.tickers.length} 銘柄を保存`);
+    const warningCount = result.tickers.reduce((acc, t) => acc + t.warnings.length, 0);
+    if (warningCount > 0) {
+      appendStatus(`警告: ${warningCount} 件（詳細は出力行の warning 列/項目を確認）`);
+    }
+    appendStatus("ファイルを自動ダウンロードしました。");
   } catch (error) {
     setStatus(`エラー: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -404,7 +505,7 @@ loadSettings().catch((error) => {
   setStatus(`設定読み込みエラー: ${error instanceof Error ? error.message : String(error)}`);
 });
 
-[tickerListInput, daysBackInput, saveDirInput].forEach((el) => {
+[tickerListInput, daysBackInput, saveDirInput, outputFormatSelect].forEach((el) => {
   el.addEventListener("change", () => {
     saveSettings().catch(() => {});
   });
