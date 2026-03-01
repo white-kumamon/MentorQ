@@ -1,6 +1,10 @@
 const statusEl = document.getElementById("status");
 const symbolInput = document.getElementById("symbolInput");
-const daysBackSelect = document.getElementById("daysBack");
+const tickerListInput = document.getElementById("tickerListInput");
+const daysBackInput = document.getElementById("daysBackInput");
+const saveDirInput = document.getElementById("saveDirInput");
+
+const SETTINGS_KEY = "mentorqExporterSettings";
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -8,6 +12,44 @@ function setStatus(message) {
 
 function appendStatus(message) {
   statusEl.textContent = `${statusEl.textContent}\n${message}`.trim();
+}
+
+function parseTickerList(input) {
+  const list = input
+    .split(/[\n,\s]+/)
+    .map((v) => v.trim().toUpperCase())
+    .filter(Boolean)
+    .filter((v) => /^[A-Z0-9!._-]{1,15}$/.test(v));
+  return [...new Set(list)];
+}
+
+function normalizeSaveDir(dir) {
+  const sanitized = (dir || "mentorq-levels")
+    .replace(/\\+/g, "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .map((segment) => segment.replace(/[^\w.-]/g, "_"))
+    .filter(Boolean)
+    .join("/");
+  return sanitized || "mentorq-levels";
+}
+
+async function loadSettings() {
+  const stored = await chrome.storage.local.get(SETTINGS_KEY);
+  const settings = stored[SETTINGS_KEY] || {};
+  if (settings.tickerList) tickerListInput.value = settings.tickerList;
+  if (settings.daysBack) daysBackInput.value = String(settings.daysBack);
+  if (settings.saveDir) saveDirInput.value = settings.saveDir;
+}
+
+async function saveSettings() {
+  const payload = {
+    tickerList: tickerListInput.value,
+    daysBack: Number(daysBackInput.value || "7"),
+    saveDir: normalizeSaveDir(saveDirInput.value)
+  };
+  await chrome.storage.local.set({ [SETTINGS_KEY]: payload });
 }
 
 function parseLevels(rawText) {
@@ -115,10 +157,10 @@ async function exportFile(format) {
   }
 }
 
-async function runWatchlistAutomation(tabId, daysBack) {
+async function runTickerAutomation(tabId, tickers, daysBack) {
   return runInPage(
     tabId,
-    async (requestedDaysBack) => {
+    async (requestedTickers, requestedDaysBack) => {
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
       const clickByText = (selector, text) => {
@@ -153,19 +195,34 @@ async function runWatchlistAutomation(tabId, daysBack) {
         return true;
       };
 
-      const listWatchlistTickers = () => {
-        const inList = Array.from(document.querySelectorAll('[role="option"], [cmdk-item], [data-slot]'))
-          .map((el) => (el.textContent || "").trim())
-          .filter((txt) => /^[A-Z0-9!._-]{2,10}$/.test(txt));
-
-        const unique = [...new Set(inList)];
-        return unique;
+      const clearSelectedTickers = () => {
+        const clearButtons = Array.from(document.querySelectorAll("button"))
+          .filter((btn) => /remove|clear|×|x/i.test((btn.getAttribute("aria-label") || "") + (btn.textContent || "")));
+        let clicked = 0;
+        clearButtons.forEach((btn) => {
+          const rect = btn.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            btn.click();
+            clicked += 1;
+          }
+        });
+        return clicked;
       };
 
-      const selectTicker = (ticker) => {
+      const chooseSearchTickersTab = () => clickByText("button", "Search Tickers");
+
+      const selectTicker = async (ticker) => {
+        const input = document.querySelector('input[placeholder*="Search" i], input[type="text"]');
+        if (input) {
+          input.focus();
+          input.value = ticker;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          await sleep(200);
+        }
+
         const option = Array.from(document.querySelectorAll('[role="option"], [cmdk-item], button, div')).find((el) => {
-          const txt = (el.textContent || "").trim();
-          return txt === ticker;
+          const txt = (el.textContent || "").trim().toUpperCase();
+          return txt === ticker.toUpperCase();
         });
         if (!option) return false;
         option.click();
@@ -174,7 +231,8 @@ async function runWatchlistAutomation(tabId, daysBack) {
 
       const ensureGammaEod = async () => {
         const okOpen = Array.from(document.querySelectorAll('button[role="combobox"]')).some((btn) => {
-          if ((btn.textContent || "").toLowerCase().includes("gamma") || (btn.textContent || "").toLowerCase().includes("type")) {
+          const txt = (btn.textContent || "").toLowerCase();
+          if (txt.includes("gamma") || txt.includes("type")) {
             btn.click();
             return true;
           }
@@ -200,22 +258,15 @@ async function runWatchlistAutomation(tabId, daysBack) {
         return false;
       };
 
-      const output = { ok: true, daysBack: requestedDaysBack, generatedAt: new Date().toISOString(), tickers: [] };
+      const output = {
+        ok: true,
+        daysBack: requestedDaysBack,
+        requestedTickers,
+        generatedAt: new Date().toISOString(),
+        tickers: []
+      };
 
-      if (!openTickerDropdown()) {
-        return { ok: false, error: "Ticker dropdown を開けませんでした。" };
-      }
-      await sleep(400);
-
-      const watchlistTickers = listWatchlistTickers().slice(0, 30);
-      if (!watchlistTickers.length) {
-        return { ok: false, error: "Watchlist銘柄を取得できませんでした。" };
-      }
-
-      clickByText("body", "Search Tickers");
-      await sleep(100);
-
-      for (const ticker of watchlistTickers) {
+      for (const ticker of requestedTickers) {
         const perTicker = { ticker, records: [], warnings: [] };
 
         if (!openTickerDropdown()) {
@@ -223,16 +274,25 @@ async function runWatchlistAutomation(tabId, daysBack) {
           output.tickers.push(perTicker);
           continue;
         }
+
         await sleep(250);
-        if (!selectTicker(ticker)) {
+        chooseSearchTickersTab();
+        await sleep(200);
+        clearSelectedTickers();
+
+        if (!(await selectTicker(ticker))) {
           perTicker.warnings.push("ticker selection failed");
           output.tickers.push(perTicker);
+          clickByText("body", "Search Tickers");
           continue;
         }
+
         await sleep(200);
 
-        await ensureGammaEod();
-        await sleep(200);
+        const gammaOk = await ensureGammaEod();
+        if (!gammaOk) {
+          perTicker.warnings.push("gamma eod selection failed");
+        }
 
         const beforeSearch = getCurrentRawText();
         if (!clickSearch()) {
@@ -246,6 +306,8 @@ async function runWatchlistAutomation(tabId, daysBack) {
         let date = getDisplayedDate();
         if (raw) {
           perTicker.records.push({ date: date || "unknown", rawText: raw });
+        } else {
+          perTicker.warnings.push("search result empty");
         }
 
         const seenDates = new Set(perTicker.records.map((r) => r.date));
@@ -275,11 +337,11 @@ async function runWatchlistAutomation(tabId, daysBack) {
 
       return output;
     },
-    [daysBack]
+    [tickers, daysBack]
   );
 }
 
-async function autoCollectWatchlist() {
+async function autoCollectTickers() {
   try {
     setStatus("自動収集を開始します...");
     const tab = await getActiveTab();
@@ -288,10 +350,22 @@ async function autoCollectWatchlist() {
       return;
     }
 
-    const daysBack = Number(daysBackSelect.value || "7");
-    appendStatus(`対象期間: 過去${daysBack}日`);
+    const tickers = parseTickerList(tickerListInput.value);
+    if (!tickers.length) {
+      setStatus("対象ティッカーを1つ以上入力してください（例: SPY, NQ1!）。");
+      return;
+    }
 
-    const result = await runWatchlistAutomation(tab.id, daysBack);
+    const daysBack = Math.max(1, Number(daysBackInput.value || "7"));
+    const saveDir = normalizeSaveDir(saveDirInput.value);
+    saveDirInput.value = saveDir;
+    await saveSettings();
+
+    appendStatus(`対象銘柄: ${tickers.join(", ")}`);
+    appendStatus(`対象期間: 過去${daysBack}日`);
+    appendStatus(`保存先: ${saveDir}/`);
+
+    const result = await runTickerAutomation(tab.id, tickers, daysBack);
     if (!result.ok) {
       setStatus(`自動収集失敗: ${result.error}`);
       return;
@@ -311,7 +385,7 @@ async function autoCollectWatchlist() {
     };
 
     const timestamp = new Date().toISOString().replaceAll(":", "-");
-    const filename = `mentorq-levels/watchlist_gamma_eod_${timestamp}.json`;
+    const filename = `${saveDir}/tickers_gamma_eod_${timestamp}.json`;
     await downloadContent(filename, JSON.stringify(normalized, null, 2), "application/json");
 
     const okCount = normalized.tickers.filter((t) => t.records.length > 0).length;
@@ -324,4 +398,14 @@ async function autoCollectWatchlist() {
 
 document.getElementById("exportJson").addEventListener("click", () => exportFile("json"));
 document.getElementById("exportCsv").addEventListener("click", () => exportFile("csv"));
-document.getElementById("runWatchlistAuto").addEventListener("click", autoCollectWatchlist);
+document.getElementById("runTickerAuto").addEventListener("click", autoCollectTickers);
+
+loadSettings().catch((error) => {
+  setStatus(`設定読み込みエラー: ${error instanceof Error ? error.message : String(error)}`);
+});
+
+[tickerListInput, daysBackInput, saveDirInput].forEach((el) => {
+  el.addEventListener("change", () => {
+    saveSettings().catch(() => {});
+  });
+});
