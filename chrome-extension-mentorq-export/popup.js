@@ -358,16 +358,22 @@ async function runTickerAutomation(tabId, tickers, daysBack) {
         }
 
         const firstUpdate = await waitForResultUpdate({ prevRaw: beforeSearchRaw, prevDate: beforeSearchDate, timeout: 15000 });
-        if (!firstUpdate.changed || !firstUpdate.currentRaw) {
-          perTicker.warnings.push("search result timeout or empty");
+        const fallbackRaw = getCurrentRawText();
+        const fallbackDate = getDisplayedDate();
+
+        let lastRaw = firstUpdate.currentRaw || fallbackRaw;
+        let lastDate = firstUpdate.currentDate || fallbackDate;
+
+        if (!lastRaw) {
+          perTicker.warnings.push("search result empty");
           output.tickers.push(perTicker);
           continue;
         }
+        if (!firstUpdate.changed) {
+          perTicker.warnings.push("search result unchanged");
+        }
 
-        let lastRaw = firstUpdate.currentRaw;
-        let lastDate = firstUpdate.currentDate;
-
-        const firstSymbol = normalizeSymbolInPage(firstUpdate.currentRaw.split(":")[0]);
+        const firstSymbol = normalizeSymbolInPage(lastRaw.split(":")[0]);
         if (firstSymbol !== normalizeSymbolInPage(ticker)) {
           perTicker.warnings.push(`symbol mismatch after search: expected ${ticker}, got ${firstSymbol || "UNKNOWN"}`);
           output.tickers.push(perTicker);
@@ -476,6 +482,14 @@ async function autoCollectTickers() {
     }
 
     const rows = flattenRows(result);
+    if (!rows.length) {
+      const warningSummary = result.tickers
+        .map((t) => `${t.ticker}: ${t.warnings.join(" | ") || "no records"}`)
+        .join("\n");
+      setStatus(`収集結果が0件のため保存を中止しました。\n${warningSummary}`);
+      return;
+    }
+
     const timestamp = new Date().toISOString().replaceAll(":", "-");
     if (outputFormat === "csv") {
       const csv = toAutomationCsv(rows);

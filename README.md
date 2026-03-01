@@ -32,6 +32,7 @@
 - 出力形式（JSONL/CSV）を選択
 - 「指定銘柄を自動収集（Gamma Levels EOD）」を実行
 - 処理後、`<保存先ディレクトリ>/tickers_by_date_*.jsonl` または `.csv` として保存
+- 収集結果が0件の場合は空ファイルを保存せず、ステータス欄に警告内容を表示
 
 ### ファイル構成
 - `chrome-extension-mentorq-export/manifest.json`: 拡張定義（MV3）
